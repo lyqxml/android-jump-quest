@@ -192,7 +192,7 @@ class GameWorld {
     private fun hurtPlayer() {
         val p = player
         if (p.big) {
-            p.setBig(false)
+            p.changeSize(false)
             p.invuln = 1.8f
             camera.shake = 0.25f
             spawnDust(p.cx, p.cy, 8)
@@ -296,7 +296,7 @@ class GameWorld {
             score += 1000
             popups.add(Popup(item.cx - 20f, item.y - 12f, "+1000"))
             if (!p.big) {
-                p.setBig(true)
+                p.changeSize(true)
                 p.invuln = max(p.invuln, 0.8f)
             }
             spawnDust(item.cx, item.cy, 8)

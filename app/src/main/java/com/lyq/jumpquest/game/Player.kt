@@ -18,7 +18,7 @@ class Player(x: Float, y: Float) : Entity(x, y, 24f, 40f) {
     var spin = 0f
 
     /** 变大/变小时保持脚底不动 */
-    fun setBig(value: Boolean) {
+    fun changeSize(value: Boolean) {
         if (big == value) return
         val footY = bottom
         big = value
