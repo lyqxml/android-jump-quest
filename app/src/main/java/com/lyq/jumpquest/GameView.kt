@@ -2,6 +2,9 @@ package com.lyq.jumpquest
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -17,11 +20,15 @@ import com.lyq.jumpquest.game.STEP
  * SurfaceView + 独立渲染线程的游戏主视图。
  *
  * 线程模型：
- *  - UI 线程：只负责把触摸事件翻译成 InputState，以及处理"重开"这类一次性动作；
+ *  - UI 线程：只负责把触摸事件翻译成 InputState，以及处理「重开」这类一次性动作；
  *  - 渲染线程：固定步长推进逻辑（120Hz），每一帧 lockCanvas 绘制。
+ *
+ * 容错：渲染线程里的任何 Throwable 都会被捕获并画在屏幕上（而不是让进程直接闪退），
+ * 同时写入 CrashLog，方便没有 adb 的环境定位问题。
  */
 class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
 
+    private val appContext: Context = context.applicationContext
     private val world = GameWorld()
     private val input = InputState()
     private val renderer = Renderer(resources.displayMetrics.density)
@@ -33,10 +40,17 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
     @Volatile private var running = false
     @Volatile private var surfaceReady = false
     @Volatile private var pendingRestart = false
+    @Volatile private var fatalText: String? = null
 
     private var thread: GameThread? = null
     private var viewW = 1
     private var viewH = 1
+
+    private val errorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.MONOSPACE
+        textSize = 22f
+        color = Color.WHITE
+    }
 
     init {
         holder.addCallback(this)
@@ -54,8 +68,12 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         viewW = width
         viewH = height
-        controls.layout(width, height)
-        updateViewport()
+        try {
+            controls.layout(width, height)
+            updateViewport()
+        } catch (t: Throwable) {
+            recordFatal(t, "surfaceChanged")
+        }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -70,13 +88,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
     fun resumeGame() {
         if (holder.surface?.isValid == true) {
             surfaceReady = true
-            controls.layout(viewW, viewH)
+            try {
+                controls.layout(viewW, viewH)
+            } catch (ignored: Throwable) {
+            }
             startThread()
         }
     }
 
     private fun startThread() {
-        if (thread != null) return
+        if (thread != null || fatalText != null) return
         running = true
         thread = GameThread().also { it.start() }
     }
@@ -92,50 +113,60 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         }
     }
 
+    private fun recordFatal(t: Throwable, where: String) {
+        fatalText = t.stackTraceToString()
+        CrashLog.save(appContext, t, where)
+    }
+
     // ------------------------------------------------------------------ 触摸
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                val idx = event.actionIndex
-                val id = event.getPointerId(idx)
-                val control = controls.hitTest(event.getX(idx), event.getY(idx))
-                when (control) {
-                    Control.RESTART -> pendingRestart = true
-                    Control.NONE -> {
-                        val st = world.state
-                        if (st == GameState.GAME_OVER || st == GameState.LEVEL_CLEAR) {
-                            pendingRestart = true
+        if (fatalText != null) return true
+        try {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                    val idx = event.actionIndex
+                    val id = event.getPointerId(idx)
+                    val control = controls.hitTest(event.getX(idx), event.getY(idx))
+                    when (control) {
+                        Control.RESTART -> pendingRestart = true
+                        Control.NONE -> {
+                            val st = world.state
+                            if (st == GameState.GAME_OVER || st == GameState.LEVEL_CLEAR) {
+                                pendingRestart = true
+                            }
+                        }
+                        else -> pointerControls[id] = control
+                    }
+                    syncInput()
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    for (i in 0 until event.pointerCount) {
+                        val id = event.getPointerId(i)
+                        val current = pointerControls[id] ?: continue
+                        if (current == Control.JUMP) continue
+                        val hit = controls.hitTest(event.getX(i), event.getY(i))
+                        if (hit == Control.LEFT || hit == Control.RIGHT) {
+                            pointerControls[id] = hit
                         }
                     }
-                    else -> pointerControls[id] = control
+                    syncInput()
                 }
-                syncInput()
-            }
 
-            MotionEvent.ACTION_MOVE -> {
-                for (i in 0 until event.pointerCount) {
-                    val id = event.getPointerId(i)
-                    val current = pointerControls[id] ?: continue
-                    if (current == Control.JUMP) continue
-                    val hit = controls.hitTest(event.getX(i), event.getY(i))
-                    if (hit == Control.LEFT || hit == Control.RIGHT) {
-                        pointerControls[id] = hit
-                    }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                    pointerControls.remove(event.getPointerId(event.actionIndex))
+                    if (event.actionMasked == MotionEvent.ACTION_UP) pointerControls.clear()
+                    syncInput()
                 }
-                syncInput()
-            }
 
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                pointerControls.remove(event.getPointerId(event.actionIndex))
-                if (event.actionMasked == MotionEvent.ACTION_UP) pointerControls.clear()
-                syncInput()
+                MotionEvent.ACTION_CANCEL -> {
+                    pointerControls.clear()
+                    syncInput()
+                }
             }
-
-            MotionEvent.ACTION_CANCEL -> {
-                pointerControls.clear()
-                syncInput()
-            }
+        } catch (t: Throwable) {
+            recordFatal(t, "onTouchEvent")
         }
         return true
     }
@@ -168,6 +199,14 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
 
     private inner class GameThread : Thread("JumpQuestLoop") {
         override fun run() {
+            try {
+                loop()
+            } catch (t: Throwable) {
+                recordFatal(t, "game-loop")
+            }
+        }
+
+        private fun loop() {
             var last = System.nanoTime()
             var accum = 0f
 
@@ -205,18 +244,37 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         try {
             canvas = h.lockCanvas()
             if (canvas != null && viewW > 1 && viewH > 1) {
-                renderer.draw(canvas, world, viewW, viewH, controls)
+                val fatal = fatalText
+                if (fatal != null) {
+                    drawFatal(canvas, fatal)
+                } else {
+                    renderer.draw(canvas, world, viewW, viewH, controls)
+                }
             }
-        } catch (e: Exception) {
-            // 表面正在销毁时忽略本次绘制
+        } catch (t: Throwable) {
+            // 表面正在销毁时忽略；但如果还没崩过，记一次（不弹到屏幕上，避免锁屏/切后台误报）
+            if (fatalText == null) {
+                CrashLog.save(appContext, t, "drawFrame")
+            }
         } finally {
             if (canvas != null) {
                 try {
                     h.unlockCanvasAndPost(canvas)
-                } catch (e: Exception) {
-                    // 忽略
+                } catch (ignored: Throwable) {
                 }
             }
+        }
+    }
+
+    /** 线程崩了以后也还能看到东西：把堆栈直接画在 Surface 上。 */
+    private fun drawFatal(canvas: Canvas, text: String) {
+        canvas.drawColor(Color.rgb(18, 22, 30))
+        var y = 40f
+        val lineHeight = 26f
+        for (line in text.split("\n")) {
+            if (y > viewH - 10f) break
+            canvas.drawText(line.take(80), 20f, y, errorPaint)
+            y += lineHeight
         }
     }
 }
