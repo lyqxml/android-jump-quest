@@ -1,0 +1,71 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.lyq.jumpquest'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.lyq.jumpquest"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    // CI 上如果注入了正式签名环境变量就用正式签名，否则退回 debug 签名（保证 APK 可直接安装）
+    def hasReleaseKey = System.getenv("KEYSTORE_PATH") != null && new File(System.getenv("KEYSTORE_PATH") ?: "").exists()
+
+    signingConfigs {
+        release {
+            if (hasReleaseKey) {
+                storeFile file(System.getenv("KEYSTORE_PATH"))
+                storePassword System.getenv("STORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS")
+                keyPassword System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/*.kotlin_module']
+        }
+    }
+}
+
+dependencies {
+    // 纯原生绘制：Canvas + SurfaceView，无第三方引擎
+}
